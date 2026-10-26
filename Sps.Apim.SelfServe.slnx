@@ -1,0 +1,12 @@
+<Solution>
+ <Folder Name="/src/">
+  <Project Path="src/Sps.Apim.SelfServe.Api/Sps.Apim.SelfServe.Api.csproj" />
+  <Project Path="src/Sps.Apim.SelfServe.Application/Sps.Apim.SelfServe.Application.csproj" />
+  <Project Path="src/Sps.Apim.SelfServe.Domain/Sps.Apim.SelfServe.Domain.csproj" />
+  <Project Path="src/Sps.Apim.SelfServe.Infrastructure/Sps.Apim.SelfServe.Infrastructure.csproj" />
+ </Folder>
+ <Folder Name="/tests/">
+  <Project Path="tests/Sps.Apim.SelfServe.UnitTests/Sps.Apim.SelfServe.UnitTests.csproj" />
+  <Project Path="tests/Sps.Apim.SelfServe.IntegrationTests/Sps.Apim.SelfServe.IntegrationTests.csproj" />
+ </Folder>
+</Solution>
