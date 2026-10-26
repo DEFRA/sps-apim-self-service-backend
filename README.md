@@ -24,8 +24,8 @@ Review migrations before applying them. Use a controlled deployment process for 
 ## CSRF
 Call `/api/auth/csrf`, then send the returned token in `X-XSRF-TOKEN` on state-changing requests. Include browser credentials. The authentication cookie remains HttpOnly.
 
-## POC configuration
-The supplied password length, lockout, session, security-stamp validation and rate-limit values are configurable POC defaults, not an approved production security policy.
+## Configuration
+The supplied password length, lockout, session, security-stamp validation and rate-limit values are configurable defaults, not an approved production security policy.
 
 ## Account creation
 There is intentionally no public registration endpoint. Phase 1 accounts are ICC-managed. Create the initial user through a controlled admin/seeding process without committing passwords to source control.
