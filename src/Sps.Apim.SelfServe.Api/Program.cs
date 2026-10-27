@@ -1,5 +1,6 @@
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authorization;
+using Scalar.AspNetCore;
 using Sps.Apim.SelfServe.Infrastructure;
 using Sps.Apim.SelfServe.Infrastructure.Identity;
 
@@ -171,6 +172,7 @@ app.UseHttpsRedirection();
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+    app.MapScalarApiReference();
 }
 
 // ---------------------------------------------------------
