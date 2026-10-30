@@ -1,6 +1,6 @@
 # APIM Self-Service Portal backend
 
-Backend baseline for Spike 749085 using .NET 10, ASP.NET Core Identity, EF Core Code First and Azure SQL.
+Backend baseline using .NET 10, ASP.NET Core Identity, EF Core Code First and Azure SQL.
 
 ## Before running
 Update `ConnectionStrings:DefaultConnection`. The checked-in placeholder uses `Authentication=Active Directory Default` and contains no password.
