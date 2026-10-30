@@ -24,6 +24,9 @@ Review migrations before applying them. Use a controlled deployment process for 
 ## CSRF
 Call `/api/auth/csrf`, then send the returned token in `X-XSRF-TOKEN` on state-changing requests. Include browser credentials. The authentication cookie remains HttpOnly.
 
+## Frontend CORS
+Configure `Cors:AllowedOrigins` with the exact origin(s) of trusted frontend deployments, including scheme and host but no path. For example, set the API App Service application setting `Cors__AllowedOrigins__0` to `https://<frontend-app>.azurewebsites.net`. Do not use `*`: the API uses credentialed browser requests. For local development, add `http://localhost:4200` to `Cors:AllowedOrigins` in your local `appsettings.Development.json`; production startup fails if no frontend origin is configured. Authentication and antiforgery cookies use `SameSite=None` and `Secure` so browsers can send them between the separately hosted frontend and API; keep antiforgery validation enabled for state-changing requests.
+
 ## Configuration
 The supplied password length, lockout, session, security-stamp validation and rate-limit values are configurable defaults, not an approved production security policy.
 

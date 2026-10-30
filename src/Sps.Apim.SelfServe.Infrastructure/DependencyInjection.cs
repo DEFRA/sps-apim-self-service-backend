@@ -119,7 +119,7 @@ public static class DependencyInjection
                 CookieSecurePolicy.Always;
 
             options.Cookie.SameSite =
-                SameSiteMode.Strict;
+                SameSiteMode.None;
 
             options.Cookie.Path = "/";
 

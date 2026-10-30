@@ -6,6 +6,17 @@ using Sps.Apim.SelfServe.Infrastructure.Identity;
 
 var builder = WebApplication.CreateBuilder(args);
 
+var allowedFrontendOrigins =
+    builder.Configuration
+        .GetSection("Cors:AllowedOrigins")
+        .Get<string[]>() ?? [];
+
+if (allowedFrontendOrigins.Length == 0)
+{
+    throw new InvalidOperationException(
+        "At least one frontend origin must be configured in Cors:AllowedOrigins.");
+}
+
 // ---------------------------------------------------------
 // MVC / API Controllers
 // ---------------------------------------------------------
@@ -15,6 +26,20 @@ var builder = WebApplication.CreateBuilder(args);
 //
 
 builder.Services.AddControllersWithViews();
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy(
+        "Frontend",
+        policy =>
+        {
+            policy
+                .WithOrigins(allowedFrontendOrigins)
+                .AllowAnyHeader()
+                .AllowAnyMethod()
+                .AllowCredentials();
+        });
+});
 
 // ---------------------------------------------------------
 // OpenAPI
@@ -78,7 +103,7 @@ builder.Services.AddAntiforgery(options =>
         CookieSecurePolicy.Always;
 
     options.Cookie.SameSite =
-        SameSiteMode.Strict;
+        SameSiteMode.None;
 
     options.Cookie.Path = "/";
 });
@@ -161,6 +186,10 @@ app.UseExceptionHandler();
 // ---------------------------------------------------------
 
 app.UseHttpsRedirection();
+
+// CORS must run before rate limiting and authentication so
+// credentialed browser requests and preflight requests are handled.
+app.UseCors("Frontend");
 
 // ---------------------------------------------------------
 // OpenAPI
