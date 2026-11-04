@@ -111,7 +111,8 @@ public static class DependencyInjection
         services.ConfigureApplicationCookie(options =>
         {
             options.Cookie.Name =
-                "__Host-sps-apim-selfserve-auth";
+                configuration["Authentication:CookieName"]
+                ?? "__Host-sps-apim-selfserve-auth";
 
             options.Cookie.HttpOnly = true;
 
