@@ -22,4 +22,22 @@ public sealed class GovNotifyOptions
         get;
         init;
     } = string.Empty;
+
+    public string AccessRequestTemplateId
+    {
+        get;
+        init;
+    } = string.Empty;
+
+    public string AccessDecisionTemplateId
+    {
+        get;
+        init;
+    } = string.Empty;
+
+    public string AccessRequestRecipientEmail
+    {
+        get;
+        init;
+    } = string.Empty;
 }

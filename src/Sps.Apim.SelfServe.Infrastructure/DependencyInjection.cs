@@ -192,6 +192,10 @@ public static class DependencyInjection
             AccountRecoveryService>();
 
         services.AddScoped<
+            IAccessRequestService,
+            AccessRequestService>();
+
+        services.AddScoped<
             INotificationService,
             GovNotifyService>();
 

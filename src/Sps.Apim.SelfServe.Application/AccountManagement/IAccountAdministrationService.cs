@@ -22,24 +22,38 @@ public interface IAccountAdministrationService
     GetUsersAsync(
         CancellationToken cancellationToken);
 
-    Task ReissueActivationAsync(
+    Task<int> GetUserCountAsync(
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyCollection<ProjectResponse>> GetProjectsAsync(
+        CancellationToken cancellationToken);
+
+    Task<UserAccessResponse> GetUserAccessAsync(
         Guid userId,
-        string reason,
+        CancellationToken cancellationToken);
+
+    Task UpdateUserAccessAsync(
+        ClaimsPrincipal administrator,
+        Guid userId,
+        UpdateUserAccessRequest request,
         string? correlationId,
         CancellationToken cancellationToken);
 
     Task UnlockAsync(
+        ClaimsPrincipal administrator,
         Guid userId,
         string? correlationId,
         CancellationToken cancellationToken);
 
     Task DisableAsync(
+        ClaimsPrincipal administrator,
         Guid userId,
         string reason,
         string? correlationId,
         CancellationToken cancellationToken);
 
     Task EnableAsync(
+        ClaimsPrincipal administrator,
         Guid userId,
         string reason,
         string? correlationId,

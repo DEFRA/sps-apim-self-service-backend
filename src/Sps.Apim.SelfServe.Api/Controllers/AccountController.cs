@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Sps.Apim.SelfServe.Application.AccountManagement;
 
 namespace Sps.Apim.SelfServe.Api.Controllers;
@@ -7,7 +8,8 @@ namespace Sps.Apim.SelfServe.Api.Controllers;
 [ApiController]
 [Route("api/account")]
 public sealed class AccountController(
-    IAccountRecoveryService accounts)
+    IAccountRecoveryService accounts,
+    IAccessRequestService accessRequests)
     : ControllerBase
 {
     [HttpPost("activate")]
@@ -68,6 +70,20 @@ public sealed class AccountController(
         return NoContent();
     }
 
+    [HttpPost("access-request")]
+    [AllowAnonymous]
+    [ValidateAntiForgeryToken]
+    [EnableRateLimiting("public-form")]
+    public async Task<IActionResult> SubmitAccessRequest(
+        AccessRequestRequest request,
+        CancellationToken cancellationToken)
+    {
+        await accessRequests.SubmitAsync(
+            request,
+            cancellationToken);
+
+        return NoContent();
+    }
 
     [HttpPost("password-reset/complete")]
     [AllowAnonymous]

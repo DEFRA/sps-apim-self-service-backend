@@ -29,6 +29,10 @@ public sealed class DatabaseSeeder
     {
         await EnsureRoleExistsAsync(RoleNames.Administrator);
         await EnsureRoleExistsAsync(RoleNames.User);
+        foreach (var role in RoleNames.ManageAccessRoles)
+        {
+            await EnsureRoleExistsAsync(role);
+        }
 
         if (!_options.Enabled)
         {

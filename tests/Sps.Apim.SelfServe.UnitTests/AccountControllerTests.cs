@@ -10,6 +10,52 @@ namespace Sps.Apim.SelfServe.UnitTests;
 
 public sealed class AccountControllerTests
 {
+    [Fact]
+    public async Task AdminAccessRequests_records_decision_and_returns_updated_request()
+    {
+        var service = new FakeAccessRequestService();
+        var controller = new AdminAccessRequestsController(service)
+        {
+            ControllerContext = new ControllerContext
+            {
+                HttpContext = ControllerTestContext.Create().HttpContext
+            }
+        };
+        var requestId = Guid.NewGuid();
+        var decision = new AccessRequestDecisionRequest
+        {
+            Outcome = "Approved",
+            Role = "API Developer",
+            ProjectId = Guid.NewGuid(),
+            DecisionNote = "Approved by the ICC."
+        };
+
+        var result = await controller.RecordDecision(
+            requestId,
+            decision,
+            CancellationToken.None);
+
+        var response = Assert.IsType<OkObjectResult>(result);
+        Assert.Equal("Approved", Assert.IsType<AccessRequestResponse>(response.Value).Status);
+        Assert.Equal(requestId, service.DecidedRequestId);
+        Assert.Same(decision, service.RecordedDecision);
+    }
+
+    [Fact]
+    public async Task AdminAccessRequests_can_retry_decision_email()
+    {
+        var service = new FakeAccessRequestService();
+        var controller = new AdminAccessRequestsController(service);
+        var requestId = Guid.NewGuid();
+
+        var result = await controller.SendDecisionEmail(
+            requestId,
+            CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+        Assert.Equal(requestId, service.EmailedRequestId);
+    }
+
     [Theory]
     [InlineData(true, 204)]
     [InlineData(false, 400)]
@@ -63,6 +109,29 @@ public sealed class AccountControllerTests
         Assert.Equal("test-trace", service.PasswordResetCorrelationId);
     }
 
+    [Fact]
+    public async Task SubmitAccessRequest_forwards_request_to_service_and_returns_no_content()
+    {
+        var service = new FakeAccountRecoveryService();
+        var accessRequestService = new FakeAccessRequestService();
+        var controller = CreateController(service, accessRequestService);
+        var request = new AccessRequestRequest
+        {
+            FirstName = "Ada",
+            LastName = "Lovelace",
+            Email = "ada@example.com",
+            RequestType = "Onboard a new API",
+            Reason = "I need to onboard the service."
+        };
+
+        var result = await controller.SubmitAccessRequest(
+            request,
+            CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+        Assert.Same(request, accessRequestService.SubmittedRequest);
+    }
+
     [Theory]
     [InlineData(true, 204)]
     [InlineData(false, 400)]
@@ -86,7 +155,15 @@ public sealed class AccountControllerTests
         Assert.Equal("test-trace", service.ResetPasswordCorrelationId);
     }
 
-    private static AccountController CreateController(FakeAccountRecoveryService service, string environmentName = "Production")
+    private static AccountController CreateController(
+        FakeAccountRecoveryService service,
+        string environmentName = "Production") =>
+        CreateController(service, new FakeAccessRequestService(), environmentName);
+
+    private static AccountController CreateController(
+        FakeAccountRecoveryService service,
+        FakeAccessRequestService accessRequestService,
+        string environmentName = "Production")
     {
         var httpContext = ControllerTestContext.Create().HttpContext;
         var services = new ServiceCollection();
@@ -94,7 +171,7 @@ public sealed class AccountControllerTests
             new TestWebHostEnvironment(environmentName));
         httpContext.RequestServices = services.BuildServiceProvider();
 
-        return new AccountController(service)
+        return new AccountController(service, accessRequestService)
         {
             ControllerContext = new ControllerContext { HttpContext = httpContext }
         };
@@ -137,6 +214,59 @@ public sealed class AccountControllerTests
             CompletePasswordResetRequest = request;
             ResetPasswordCorrelationId = correlationId;
             return Task.FromResult(ResetPasswordResult);
+        }
+    }
+
+    private sealed class FakeAccessRequestService : IAccessRequestService
+    {
+        public AccessRequestRequest? SubmittedRequest { get; private set; }
+        public Guid? DecidedRequestId { get; private set; }
+        public AccessRequestDecisionRequest? RecordedDecision { get; private set; }
+        public Guid? EmailedRequestId { get; private set; }
+
+        public Task SubmitAsync(
+            AccessRequestRequest request,
+            CancellationToken cancellationToken)
+        {
+            SubmittedRequest = request;
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyCollection<AccessRequestResponse>> GetAllAsync(
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyCollection<AccessRequestResponse>>([]);
+
+        public Task<AccessRequestResponse?> GetAsync(
+            Guid requestId,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<AccessRequestResponse?>(null);
+
+        public Task<int> GetCountAsync(
+            CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+
+        public Task<AccessRequestResponse> RecordDecisionAsync(
+            System.Security.Claims.ClaimsPrincipal administrator,
+            Guid requestId,
+            AccessRequestDecisionRequest decision,
+            string? correlationId,
+            CancellationToken cancellationToken)
+        {
+            DecidedRequestId = requestId;
+            RecordedDecision = decision;
+            return Task.FromResult(new AccessRequestResponse
+            {
+                Id = requestId,
+                Status = decision.Outcome
+            });
+        }
+
+        public Task SendDecisionEmailAsync(
+            Guid requestId,
+            CancellationToken cancellationToken)
+        {
+            EmailedRequestId = requestId;
+            return Task.CompletedTask;
         }
     }
 }

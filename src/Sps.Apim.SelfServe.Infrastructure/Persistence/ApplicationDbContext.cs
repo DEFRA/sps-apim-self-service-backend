@@ -29,6 +29,9 @@ public class ApplicationDbContext
     public DbSet<AccountToken> AccountTokens =>
         Set<AccountToken>();
 
+    public DbSet<AccessRequest> AccessRequests =>
+        Set<AccessRequest>();
+
     protected override void OnModelCreating(
         ModelBuilder builder)
     {

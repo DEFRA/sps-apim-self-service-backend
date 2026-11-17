@@ -32,14 +32,12 @@ public sealed class AccountAdministrationService
 
     public AccountAdministrationService(
         UserManager<ApplicationUser> userManager,
-        //RoleManager<IdentityRole<Guid>> roleManager,
         ApplicationDbContext dbContext,
         AuditWriter auditWriter,
         IOptions<AccountLifecycleOptions> options,
         INotificationService notifications)
     {
         _userManager = userManager;
-        //_roleManager = roleManager;
         _dbContext = dbContext;
         _auditWriter = auditWriter;
         _options = options.Value;
@@ -176,14 +174,16 @@ public sealed class AccountAdministrationService
             user.Id,
             "Succeeded",
             correlationId,
-            cancellationToken);
+            cancellationToken,
+            administratorId);
 
         await _auditWriter.WriteAsync(
             "ACTIVATION_ISSUED",
             user.Id,
             "Succeeded",
             correlationId,
-            cancellationToken);
+            cancellationToken,
+            administratorId);
 
         var activationUrl =
             BuildActivationUrl(
@@ -210,7 +210,8 @@ public sealed class AccountAdministrationService
     {
         if (
             role != RoleNames.User &&
-            role != RoleNames.Administrator)
+            role != RoleNames.Administrator &&
+            !RoleNames.ManageAccessRoles.Contains(role))
         {
             throw new InvalidOperationException(
                 "Invalid portal role.");
@@ -219,7 +220,8 @@ public sealed class AccountAdministrationService
 
     private async Task ValidateProjectsAsync(
         IReadOnlyCollection<Guid> projectIds,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyCollection<Guid>? existingProjectIds = null)
     {
         if (projectIds.Count == 0)
         {
@@ -228,13 +230,14 @@ public sealed class AccountAdministrationService
 
         var distinctIds =
             projectIds.Distinct().ToArray();
+        var existingIds = existingProjectIds?.ToArray() ?? [];
 
         var existingCount =
             await _dbContext.Projects
                 .CountAsync(
                     project =>
-                        distinctIds.Contains(
-                            project.Id),
+                        distinctIds.Contains(project.Id) &&
+                        (project.IsActive || existingIds.Contains(project.Id)),
                     cancellationToken);
 
         if (
@@ -245,6 +248,230 @@ public sealed class AccountAdministrationService
                 "One or more selected projects " +
                 "do not exist.");
         }
+    }
+
+    public async Task<IReadOnlyCollection<ProjectResponse>> GetProjectsAsync(
+            CancellationToken cancellationToken)
+        {
+            return await _dbContext.Projects
+                .AsNoTracking()
+                .Where(project => project.IsActive)
+                .OrderBy(project => project.Name)
+                .Select(project => new ProjectResponse
+                {
+                    Id = project.Id,
+                    Name = project.Name,
+                    IsActive = project.IsActive
+                })
+                .ToListAsync(cancellationToken);
+        }
+
+        public async Task<UserAccessResponse> GetUserAccessAsync(
+            Guid userId,
+            CancellationToken cancellationToken)
+        {
+            var user = await _userManager.FindByIdAsync(userId.ToString());
+            if (user is null)
+            {
+                throw new KeyNotFoundException("User account was not found.");
+            }
+
+            var roles = await _userManager.GetRolesAsync(user);
+            var role = roles.FirstOrDefault(RoleNames.ManageAccessRoles.Contains)
+                ?? roles.FirstOrDefault(roleName => roleName == RoleNames.Administrator)
+                ?? RoleNames.ApiDeveloper;
+
+            var projectIds = await _dbContext.UserProjects
+                .Where(userProject => userProject.UserId == userId)
+                .Select(userProject => userProject.ProjectId)
+                .ToListAsync(cancellationToken);
+
+            var historyEvents = new[]
+            {
+                "ACCOUNT_CREATED",
+                "USER_ACCESS_UPDATED",
+                "ACCOUNT_ENABLED",
+                "ACCOUNT_DISABLED",
+                "ACCOUNT_UNLOCKED",
+                "ACTIVATION_ISSUED",
+                "ACTIVATION_REISSUED"
+            };
+            var audits = await _dbContext.AuditEvents
+                .AsNoTracking()
+                .Where(audit =>
+                    audit.UserId == userId &&
+                    historyEvents.Contains(audit.EventType))
+                .OrderByDescending(audit => audit.OccurredAtUtc)
+                .Take(20)
+                .ToListAsync(cancellationToken);
+
+            var actorIds = audits
+                .Where(audit => audit.ActorUserId.HasValue)
+                .Select(audit => audit.ActorUserId!.Value)
+                .Distinct()
+                .ToArray();
+            var actorNames = await _userManager.Users
+                .Where(actor => actorIds.Contains(actor.Id))
+                .ToDictionaryAsync(
+                    actor => actor.Id,
+                    actor => actor.DisplayName,
+                    cancellationToken);
+
+            return new UserAccessResponse
+            {
+                UserId = user.Id,
+                DisplayName = user.DisplayName,
+                Email = user.Email ?? string.Empty,
+                Status = user.Status.ToString(),
+                IsLocked = user.LockoutEnd.HasValue &&
+                    user.LockoutEnd.Value > DateTimeOffset.UtcNow,
+                Role = role == RoleNames.Administrator
+                    ? RoleNames.IccAdministrator
+                    : role == RoleNames.User
+                        ? RoleNames.ApiDeveloper
+                        : role,
+                ProjectIds = projectIds,
+                Projects = await _dbContext.Projects
+                    .AsNoTracking()
+                    .Where(project =>
+                        project.IsActive || projectIds.Contains(project.Id))
+                    .OrderBy(project => project.Name)
+                    .Select(project => new ProjectResponse
+                    {
+                        Id = project.Id,
+                        Name = project.Name,
+                        IsActive = project.IsActive
+                    })
+                    .ToListAsync(cancellationToken),
+                History = audits.Select(audit => new AccountAccessHistoryResponse
+                {
+                    Action = audit.EventType,
+                    Reason = audit.Outcome,
+                    ChangedBy = audit.ActorUserId is Guid actorId &&
+                        actorNames.TryGetValue(actorId, out var actorName)
+                            ? actorName
+                            : "Not recorded",
+                    ChangedAtUtc = audit.OccurredAtUtc
+                }).ToArray()
+            };
+        }
+
+        public async Task UpdateUserAccessAsync(
+            ClaimsPrincipal administrator,
+            Guid userId,
+            UpdateUserAccessRequest request,
+            string? correlationId,
+            CancellationToken cancellationToken)
+        {
+            var user = await _userManager.FindByIdAsync(userId.ToString());
+            if (user is null)
+            {
+                throw new KeyNotFoundException("User account was not found.");
+            }
+
+            ValidateRole(request.Role);
+            if (!RoleNames.ManageAccessRoles.Contains(request.Role))
+            {
+                throw new InvalidOperationException("Select a valid access role.");
+            }
+
+            if (!Enum.TryParse<AccountStatus>(request.Status, out var requestedStatus) ||
+                !Enum.IsDefined(requestedStatus))
+            {
+                throw new InvalidOperationException("Select a valid account status.");
+            }
+
+            if (requestedStatus == AccountStatus.Active &&
+                user.ActivatedAtUtc is null &&
+                user.Status != AccountStatus.Active)
+            {
+                throw new InvalidOperationException(
+                    "A pending account must be activated before it can be enabled.");
+            }
+
+            if (user.Status != AccountStatus.PendingActivation &&
+                requestedStatus == AccountStatus.PendingActivation)
+            {
+                throw new InvalidOperationException(
+                    "An account cannot be moved back to pending activation.");
+            }
+
+            if (string.IsNullOrWhiteSpace(request.Reason))
+            {
+                throw new InvalidOperationException("Enter a reason for the change.");
+            }
+
+            var actorId = GetUserId(administrator);
+            await using var transaction =
+                await _dbContext.Database.BeginTransactionAsync(cancellationToken);
+
+            var existingProjects = await _dbContext.UserProjects
+                .Where(userProject => userProject.UserId == userId)
+                .ToListAsync(cancellationToken);
+            await ValidateProjectsAsync(
+                request.ProjectIds,
+                cancellationToken,
+                existingProjects.Select(project => project.ProjectId).ToArray());
+
+            var existingRoles = await _userManager.GetRolesAsync(user);
+            var managedRoles = existingRoles
+                .Where(existingRole =>
+                    RoleNames.ManageAccessRoles.Contains(existingRole) ||
+                    existingRole == RoleNames.User ||
+                    existingRole == RoleNames.Administrator)
+                .ToArray();
+            if (managedRoles.Length > 0)
+            {
+                var removeResult = await _userManager.RemoveFromRolesAsync(user, managedRoles);
+                if (!removeResult.Succeeded)
+                {
+                    throw new InvalidOperationException(FormatIdentityErrors(removeResult));
+                }
+            }
+
+            var addResult = await _userManager.AddToRoleAsync(user, request.Role);
+            if (!addResult.Succeeded)
+            {
+                throw new InvalidOperationException(FormatIdentityErrors(addResult));
+            }
+
+            _dbContext.UserProjects.RemoveRange(existingProjects);
+            foreach (var projectId in request.ProjectIds.Distinct())
+            {
+                _dbContext.UserProjects.Add(new UserProject
+                {
+                    UserId = userId,
+                    ProjectId = projectId
+                });
+            }
+
+            user.Status = requestedStatus;
+            user.DisabledAtUtc = requestedStatus == AccountStatus.Disabled
+                ? user.DisabledAtUtc ?? DateTimeOffset.UtcNow
+                : null;
+            user.UpdatedAtUtc = DateTimeOffset.UtcNow;
+
+            var updateResult = await _userManager.UpdateAsync(user);
+            if (!updateResult.Succeeded)
+            {
+                throw new InvalidOperationException(FormatIdentityErrors(updateResult));
+            }
+
+            var stampResult = await _userManager.UpdateSecurityStampAsync(user);
+            if (!stampResult.Succeeded)
+            {
+                throw new InvalidOperationException(FormatIdentityErrors(stampResult));
+            }
+
+            await _dbContext.SaveChangesAsync(cancellationToken);
+            await _auditWriter.WriteAsync(
+                "USER_ACCESS_UPDATED",
+                user.Id,
+                request.Reason.Trim(),
+                correlationId,
+                cancellationToken,
+                actorId);
+            await transaction.CommitAsync(cancellationToken);
     }
 
     private Guid? GetUserId(
@@ -287,6 +514,7 @@ public sealed class AccountAdministrationService
     }
 
     public async Task EnableAsync(
+    ClaimsPrincipal administrator,
     Guid userId,
     string reason,
     string? correlationId,
@@ -299,27 +527,53 @@ public sealed class AccountAdministrationService
 
         if (user is null)
         {
-            return;
+            throw new KeyNotFoundException(
+                "User account was not found.");
+        }
+
+        if (user.Status != AccountStatus.Disabled)
+        {
+            throw new InvalidOperationException(
+                "Only disabled accounts can be enabled.");
         }
 
         user.Status =
             AccountStatus.Active;
 
+        user.DisabledAtUtc = null;
+
         user.UpdatedAtUtc =
             DateTimeOffset.UtcNow;
 
-        await _userManager.UpdateAsync(
-            user);
+        var updateResult =
+            await _userManager.UpdateAsync(user);
+
+        if (!updateResult.Succeeded)
+        {
+            throw new InvalidOperationException(
+                FormatIdentityErrors(updateResult));
+        }
+
+        var stampResult =
+            await _userManager.UpdateSecurityStampAsync(user);
+
+        if (!stampResult.Succeeded)
+        {
+            throw new InvalidOperationException(
+                FormatIdentityErrors(stampResult));
+        }
 
         await _auditWriter.WriteAsync(
             "ACCOUNT_ENABLED",
             user.Id,
             reason,
             correlationId,
-            cancellationToken);
+            cancellationToken,
+            GetUserId(administrator));
     }
 
     public async Task DisableAsync(
+    ClaimsPrincipal administrator,
     Guid userId,
     string reason,
     string? correlationId,
@@ -332,28 +586,50 @@ public sealed class AccountAdministrationService
 
         if (user is null)
         {
-            return;
+            throw new KeyNotFoundException(
+                "User account was not found.");
+        }
+
+        if (user.Status != AccountStatus.Active)
+        {
+            throw new InvalidOperationException(
+                "Only active accounts can be disabled.");
         }
 
         user.Status =
             AccountStatus.Disabled;
 
+        user.DisabledAtUtc =
+            DateTimeOffset.UtcNow;
+
         user.UpdatedAtUtc =
             DateTimeOffset.UtcNow;
 
-        await _userManager.UpdateAsync(
-            user);
+        var updateResult =
+            await _userManager.UpdateAsync(user);
 
-        await _userManager
-            .UpdateSecurityStampAsync(
-                user);
+        if (!updateResult.Succeeded)
+        {
+            throw new InvalidOperationException(
+                FormatIdentityErrors(updateResult));
+        }
+
+        var stampResult =
+            await _userManager.UpdateSecurityStampAsync(user);
+
+        if (!stampResult.Succeeded)
+        {
+            throw new InvalidOperationException(
+                FormatIdentityErrors(stampResult));
+        }
 
         await _auditWriter.WriteAsync(
             "ACCOUNT_DISABLED",
             user.Id,
             reason,
             correlationId,
-            cancellationToken);
+            cancellationToken,
+            GetUserId(administrator));
     }
 
     public async Task<
@@ -387,17 +663,38 @@ public sealed class AccountAdministrationService
                         user.DisplayName,
 
                     Status =
-                        user.Status.ToString(),
+                        user.LockoutEnd.HasValue &&
+                        user.LockoutEnd.Value > DateTimeOffset.UtcNow
+                            ? "Locked"
+                            : user.Status.ToString(),
 
                     Roles =
-                        roles.ToList()
+                        roles.Select(role => role switch
+                        {
+                            RoleNames.Administrator => RoleNames.IccAdministrator,
+                            RoleNames.User => RoleNames.ApiDeveloper,
+                            _ => role
+                        }).ToList(),
+
+                    Projects = await _dbContext.UserProjects
+                        .Where(userProject => userProject.UserId == user.Id)
+                        .Select(userProject => userProject.Project.Name)
+                        .OrderBy(projectName => projectName)
+                        .ToListAsync(cancellationToken)
                 });
         }
 
         return result;
     }
 
+    public Task<int> GetUserCountAsync(
+        CancellationToken cancellationToken)
+    {
+        return _userManager.Users.CountAsync(cancellationToken);
+    }
+
     public async Task UnlockAsync(
+    ClaimsPrincipal administrator,
     Guid userId,
     string? correlationId,
     CancellationToken cancellationToken)
@@ -412,6 +709,7 @@ public sealed class AccountAdministrationService
             return;
         }
 
+
         await _userManager
             .SetLockoutEndDateAsync(
                 user,
@@ -422,7 +720,8 @@ public sealed class AccountAdministrationService
             user.Id,
             "Succeeded",
             correlationId,
-            cancellationToken);
+            cancellationToken,
+            GetUserId(administrator));
     }
 
     public async Task<ReissueActivationResponse>
@@ -515,23 +814,26 @@ public sealed class AccountAdministrationService
             user.Id,
             "Succeeded",
             correlationId,
-            cancellationToken);
+            cancellationToken,
+            administratorId);
+
+        var activationUrl =
+            BuildActivationUrl(
+                user.Id,
+                rawToken);
+
+        await _notifications
+            .SendActivationEmailAsync(
+                user.Email!,
+                activationUrl,
+                cancellationToken);
 
         return new ReissueActivationResponse
         {
             UserId = user.Id,
 
-            ExpiresAtUtc = expiresAt,
-
-            ActivationUrl =
-                BuildActivationUrl(
-                    user.Id,
-                    rawToken)
+            ExpiresAtUtc = expiresAt
         };
     }
 
-    public Task ReissueActivationAsync(Guid userId, string reason, string? correlationId, CancellationToken cancellationToken)
-    {
-        throw new NotImplementedException();
-    }
 }
