@@ -252,42 +252,42 @@ public sealed class AccountAdministrationService
 
     public async Task<IReadOnlyCollection<ProjectResponse>> GetProjectsAsync(
             CancellationToken cancellationToken)
+    {
+        return await _dbContext.Projects
+            .AsNoTracking()
+            .Where(project => project.IsActive)
+            .OrderBy(project => project.Name)
+            .Select(project => new ProjectResponse
+            {
+                Id = project.Id,
+                Name = project.Name,
+                IsActive = project.IsActive
+            })
+            .ToListAsync(cancellationToken);
+    }
+
+    public async Task<UserAccessResponse> GetUserAccessAsync(
+        Guid userId,
+        CancellationToken cancellationToken)
+    {
+        var user = await _userManager.FindByIdAsync(userId.ToString());
+        if (user is null)
         {
-            return await _dbContext.Projects
-                .AsNoTracking()
-                .Where(project => project.IsActive)
-                .OrderBy(project => project.Name)
-                .Select(project => new ProjectResponse
-                {
-                    Id = project.Id,
-                    Name = project.Name,
-                    IsActive = project.IsActive
-                })
-                .ToListAsync(cancellationToken);
+            throw new KeyNotFoundException("User account was not found.");
         }
 
-        public async Task<UserAccessResponse> GetUserAccessAsync(
-            Guid userId,
-            CancellationToken cancellationToken)
+        var roles = await _userManager.GetRolesAsync(user);
+        var role = roles.FirstOrDefault(RoleNames.ManageAccessRoles.Contains)
+            ?? roles.FirstOrDefault(roleName => roleName == RoleNames.Administrator)
+            ?? RoleNames.ApiDeveloper;
+
+        var projectIds = await _dbContext.UserProjects
+            .Where(userProject => userProject.UserId == userId)
+            .Select(userProject => userProject.ProjectId)
+            .ToListAsync(cancellationToken);
+
+        var historyEvents = new[]
         {
-            var user = await _userManager.FindByIdAsync(userId.ToString());
-            if (user is null)
-            {
-                throw new KeyNotFoundException("User account was not found.");
-            }
-
-            var roles = await _userManager.GetRolesAsync(user);
-            var role = roles.FirstOrDefault(RoleNames.ManageAccessRoles.Contains)
-                ?? roles.FirstOrDefault(roleName => roleName == RoleNames.Administrator)
-                ?? RoleNames.ApiDeveloper;
-
-            var projectIds = await _dbContext.UserProjects
-                .Where(userProject => userProject.UserId == userId)
-                .Select(userProject => userProject.ProjectId)
-                .ToListAsync(cancellationToken);
-
-            var historyEvents = new[]
-            {
                 "ACCOUNT_CREATED",
                 "USER_ACCESS_UPDATED",
                 "ACCOUNT_ENABLED",
@@ -296,184 +296,218 @@ public sealed class AccountAdministrationService
                 "ACTIVATION_ISSUED",
                 "ACTIVATION_REISSUED"
             };
-            var audits = await _dbContext.AuditEvents
+        var audits = await _dbContext.AuditEvents
+            .AsNoTracking()
+            .Where(audit =>
+                audit.UserId == userId &&
+                historyEvents.Contains(audit.EventType))
+            .OrderByDescending(audit => audit.OccurredAtUtc)
+            .Take(20)
+            .ToListAsync(cancellationToken);
+
+        var actorIds = audits
+            .Where(audit => audit.ActorUserId.HasValue)
+            .Select(audit => audit.ActorUserId!.Value)
+            .Distinct()
+            .ToArray();
+        var actorNames = await _userManager.Users
+            .Where(actor => actorIds.Contains(actor.Id))
+            .ToDictionaryAsync(
+                actor => actor.Id,
+                actor => actor.DisplayName,
+                cancellationToken);
+
+        return new UserAccessResponse
+        {
+            UserId = user.Id,
+            DisplayName = user.DisplayName,
+            Email = user.Email ?? string.Empty,
+            Status = user.Status.ToString(),
+            IsLocked = user.LockoutEnd.HasValue &&
+                user.LockoutEnd.Value > DateTimeOffset.UtcNow,
+            Role = role == RoleNames.Administrator
+                ? RoleNames.IccAdministrator
+                : role == RoleNames.User
+                    ? RoleNames.ApiDeveloper
+                    : role,
+            ProjectIds = projectIds,
+            Projects = await _dbContext.Projects
                 .AsNoTracking()
-                .Where(audit =>
-                    audit.UserId == userId &&
-                    historyEvents.Contains(audit.EventType))
-                .OrderByDescending(audit => audit.OccurredAtUtc)
-                .Take(20)
-                .ToListAsync(cancellationToken);
-
-            var actorIds = audits
-                .Where(audit => audit.ActorUserId.HasValue)
-                .Select(audit => audit.ActorUserId!.Value)
-                .Distinct()
-                .ToArray();
-            var actorNames = await _userManager.Users
-                .Where(actor => actorIds.Contains(actor.Id))
-                .ToDictionaryAsync(
-                    actor => actor.Id,
-                    actor => actor.DisplayName,
-                    cancellationToken);
-
-            return new UserAccessResponse
-            {
-                UserId = user.Id,
-                DisplayName = user.DisplayName,
-                Email = user.Email ?? string.Empty,
-                Status = user.Status.ToString(),
-                IsLocked = user.LockoutEnd.HasValue &&
-                    user.LockoutEnd.Value > DateTimeOffset.UtcNow,
-                Role = role == RoleNames.Administrator
-                    ? RoleNames.IccAdministrator
-                    : role == RoleNames.User
-                        ? RoleNames.ApiDeveloper
-                        : role,
-                ProjectIds = projectIds,
-                Projects = await _dbContext.Projects
-                    .AsNoTracking()
-                    .Where(project =>
-                        project.IsActive || projectIds.Contains(project.Id))
-                    .OrderBy(project => project.Name)
-                    .Select(project => new ProjectResponse
-                    {
-                        Id = project.Id,
-                        Name = project.Name,
-                        IsActive = project.IsActive
-                    })
-                    .ToListAsync(cancellationToken),
-                History = audits.Select(audit => new AccountAccessHistoryResponse
+                .Where(project =>
+                    project.IsActive || projectIds.Contains(project.Id))
+                .OrderBy(project => project.Name)
+                .Select(project => new ProjectResponse
                 {
-                    Action = audit.EventType,
-                    Reason = audit.Outcome,
-                    ChangedBy = audit.ActorUserId is Guid actorId &&
-                        actorNames.TryGetValue(actorId, out var actorName)
-                            ? actorName
-                            : "Not recorded",
-                    ChangedAtUtc = audit.OccurredAtUtc
-                }).ToArray()
-            };
+                    Id = project.Id,
+                    Name = project.Name,
+                    IsActive = project.IsActive
+                })
+                .ToListAsync(cancellationToken),
+            History = audits.Select(audit => new AccountAccessHistoryResponse
+            {
+                Action = audit.EventType,
+                Reason = audit.Outcome,
+                ChangedBy = audit.ActorUserId is Guid actorId &&
+                    actorNames.TryGetValue(actorId, out var actorName)
+                        ? actorName
+                        : "Not recorded",
+                ChangedAtUtc = audit.OccurredAtUtc
+            }).ToArray()
+        };
+    }
+
+    public async Task UpdateUserAccessAsync(
+       ClaimsPrincipal administrator,
+       Guid userId,
+       UpdateUserAccessRequest request,
+       string? correlationId,
+       CancellationToken cancellationToken)
+    {
+        ValidateRole(request.Role);
+
+        if (!RoleNames.ManageAccessRoles.Contains(request.Role))
+        {
+            throw new InvalidOperationException("Select a valid access role.");
         }
 
-        public async Task UpdateUserAccessAsync(
-            ClaimsPrincipal administrator,
-            Guid userId,
-            UpdateUserAccessRequest request,
-            string? correlationId,
-            CancellationToken cancellationToken)
+        if (!Enum.TryParse<AccountStatus>(request.Status, out var requestedStatus) ||
+            !Enum.IsDefined(requestedStatus))
         {
-            var user = await _userManager.FindByIdAsync(userId.ToString());
-            if (user is null)
-            {
-                throw new KeyNotFoundException("User account was not found.");
-            }
+            throw new InvalidOperationException("Select a valid account status.");
+        }
 
-            ValidateRole(request.Role);
-            if (!RoleNames.ManageAccessRoles.Contains(request.Role))
-            {
-                throw new InvalidOperationException("Select a valid access role.");
-            }
+        if (string.IsNullOrWhiteSpace(request.Reason))
+        {
+            throw new InvalidOperationException("Enter a reason for the change.");
+        }
 
-            if (!Enum.TryParse<AccountStatus>(request.Status, out var requestedStatus) ||
-                !Enum.IsDefined(requestedStatus))
-            {
-                throw new InvalidOperationException("Select a valid account status.");
-            }
+        var actorId = GetUserId(administrator);
 
-            if (requestedStatus == AccountStatus.Active &&
-                user.ActivatedAtUtc is null &&
-                user.Status != AccountStatus.Active)
-            {
-                throw new InvalidOperationException(
-                    "A pending account must be activated before it can be enabled.");
-            }
+        var strategy = _dbContext.Database.CreateExecutionStrategy();
 
-            if (user.Status != AccountStatus.PendingActivation &&
-                requestedStatus == AccountStatus.PendingActivation)
-            {
-                throw new InvalidOperationException(
-                    "An account cannot be moved back to pending activation.");
-            }
-
-            if (string.IsNullOrWhiteSpace(request.Reason))
-            {
-                throw new InvalidOperationException("Enter a reason for the change.");
-            }
-
-            var actorId = GetUserId(administrator);
+        await strategy.ExecuteAsync(async () =>
+        {
             await using var transaction =
                 await _dbContext.Database.BeginTransactionAsync(cancellationToken);
 
-            var existingProjects = await _dbContext.UserProjects
-                .Where(userProject => userProject.UserId == userId)
-                .ToListAsync(cancellationToken);
-            await ValidateProjectsAsync(
-                request.ProjectIds,
-                cancellationToken,
-                existingProjects.Select(project => project.ProjectId).ToArray());
-
-            var existingRoles = await _userManager.GetRolesAsync(user);
-            var managedRoles = existingRoles
-                .Where(existingRole =>
-                    RoleNames.ManageAccessRoles.Contains(existingRole) ||
-                    existingRole == RoleNames.User ||
-                    existingRole == RoleNames.Administrator)
-                .ToArray();
-            if (managedRoles.Length > 0)
+            try
             {
-                var removeResult = await _userManager.RemoveFromRolesAsync(user, managedRoles);
-                if (!removeResult.Succeeded)
+                var user = await _userManager.FindByIdAsync(userId.ToString());
+
+                if (user is null)
                 {
-                    throw new InvalidOperationException(FormatIdentityErrors(removeResult));
+                    throw new KeyNotFoundException("User account was not found.");
                 }
-            }
 
-            var addResult = await _userManager.AddToRoleAsync(user, request.Role);
-            if (!addResult.Succeeded)
-            {
-                throw new InvalidOperationException(FormatIdentityErrors(addResult));
-            }
-
-            _dbContext.UserProjects.RemoveRange(existingProjects);
-            foreach (var projectId in request.ProjectIds.Distinct())
-            {
-                _dbContext.UserProjects.Add(new UserProject
+                if (requestedStatus == AccountStatus.Active &&
+                    user.ActivatedAtUtc is null &&
+                    user.Status != AccountStatus.Active)
                 {
-                    UserId = userId,
-                    ProjectId = projectId
-                });
+                    throw new InvalidOperationException(
+                        "A pending account must be activated before it can be enabled.");
+                }
+
+                if (user.Status != AccountStatus.PendingActivation &&
+                    requestedStatus == AccountStatus.PendingActivation)
+                {
+                    throw new InvalidOperationException(
+                        "An account cannot be moved back to pending activation.");
+                }
+
+                var existingProjects = await _dbContext.UserProjects
+                    .Where(userProject => userProject.UserId == userId)
+                    .ToListAsync(cancellationToken);
+
+                await ValidateProjectsAsync(
+                    request.ProjectIds,
+                    cancellationToken,
+                    existingProjects.Select(project => project.ProjectId).ToArray());
+
+                var existingRoles = await _userManager.GetRolesAsync(user);
+
+                var managedRoles = existingRoles
+                    .Where(existingRole =>
+                        RoleNames.ManageAccessRoles.Contains(existingRole) ||
+                        existingRole == RoleNames.User ||
+                        existingRole == RoleNames.Administrator)
+                    .ToArray();
+
+                if (managedRoles.Length > 0)
+                {
+                    var removeResult =
+                        await _userManager.RemoveFromRolesAsync(user, managedRoles);
+
+                    if (!removeResult.Succeeded)
+                    {
+                        throw new InvalidOperationException(
+                            FormatIdentityErrors(removeResult));
+                    }
+                }
+
+                var addResult =
+                    await _userManager.AddToRoleAsync(user, request.Role);
+
+                if (!addResult.Succeeded)
+                {
+                    throw new InvalidOperationException(
+                        FormatIdentityErrors(addResult));
+                }
+
+                _dbContext.UserProjects.RemoveRange(existingProjects);
+
+                foreach (var projectId in request.ProjectIds.Distinct())
+                {
+                    _dbContext.UserProjects.Add(new UserProject
+                    {
+                        UserId = userId,
+                        ProjectId = projectId
+                    });
+                }
+
+                user.Status = requestedStatus;
+
+                user.DisabledAtUtc = requestedStatus == AccountStatus.Disabled
+                    ? user.DisabledAtUtc ?? DateTimeOffset.UtcNow
+                    : null;
+
+                user.UpdatedAtUtc = DateTimeOffset.UtcNow;
+
+                var updateResult = await _userManager.UpdateAsync(user);
+
+                if (!updateResult.Succeeded)
+                {
+                    throw new InvalidOperationException(
+                        FormatIdentityErrors(updateResult));
+                }
+
+                var stampResult =
+                    await _userManager.UpdateSecurityStampAsync(user);
+
+                if (!stampResult.Succeeded)
+                {
+                    throw new InvalidOperationException(
+                        FormatIdentityErrors(stampResult));
+                }
+
+                await _dbContext.SaveChangesAsync(cancellationToken);
+
+                await _auditWriter.WriteAsync(
+                    "USER_ACCESS_UPDATED",
+                    user.Id,
+                    request.Reason.Trim(),
+                    correlationId,
+                    cancellationToken,
+                    actorId);
+
+                await transaction.CommitAsync(cancellationToken);
             }
-
-            user.Status = requestedStatus;
-            user.DisabledAtUtc = requestedStatus == AccountStatus.Disabled
-                ? user.DisabledAtUtc ?? DateTimeOffset.UtcNow
-                : null;
-            user.UpdatedAtUtc = DateTimeOffset.UtcNow;
-
-            var updateResult = await _userManager.UpdateAsync(user);
-            if (!updateResult.Succeeded)
+            catch
             {
-                throw new InvalidOperationException(FormatIdentityErrors(updateResult));
+                await transaction.RollbackAsync(cancellationToken);
+                throw;
             }
-
-            var stampResult = await _userManager.UpdateSecurityStampAsync(user);
-            if (!stampResult.Succeeded)
-            {
-                throw new InvalidOperationException(FormatIdentityErrors(stampResult));
-            }
-
-            await _dbContext.SaveChangesAsync(cancellationToken);
-            await _auditWriter.WriteAsync(
-                "USER_ACCESS_UPDATED",
-                user.Id,
-                request.Reason.Trim(),
-                correlationId,
-                cancellationToken,
-                actorId);
-            await transaction.CommitAsync(cancellationToken);
+        });
     }
-
     private Guid? GetUserId(
         ClaimsPrincipal administrator)
     {

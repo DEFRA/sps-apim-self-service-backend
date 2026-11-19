@@ -14,6 +14,7 @@ public static class RoleNames
         ApiDeveloper,
         ApiMaintainer,
         IccAdministrator,
+        Administrator,
         ReadOnly
     ];
 
